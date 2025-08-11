@@ -1,4 +1,5 @@
-#include <ncurses.h>                              #include <stdlib.h>
+#include <ncurses.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <ctype.h>
@@ -6,6 +7,11 @@
 #define CTRL(c) ((c) & 0x1f)
 #define MAX_LINE_LEN 256
 #define TAB_STOP 4
+
+#define C_NORMAL 1
+#define C_KEYWORD 2                               #define C_STRING 3
+#define C_NUMBER 4
+#define C_COMMENT 5
 
 typedef struct Line {
     char *text;
@@ -23,6 +29,180 @@ int offset_y = 0;
 char *filename = NULL;
 int status_msg_timer = 0;
 char status_msg[MAX_LINE_LEN] = "";
+
+char **keywords = NULL;
+char **comments = NULL;
+int enable_syntax_highlighting = 0;
+char *config_file = NULL;
+
+void free_string_array(char **array) {
+    if (array) {
+        for (int i = 0; array[i] != NULL; i++) {
+            free(array[i]);
+        }
+        free(array);
+    }
+}
+
+void load_config(const char *path) {
+    FILE *fp = fopen(path, "r");
+    if (fp == NULL) {
+        snprintf(status_msg, MAX_LINE_LEN, "Error: Could not open config file '%s'.", path);
+        status_msg_timer = 50;
+        return;
+    }
+
+    free_string_array(keywords);
+    free_string_array(comments);
+    keywords = NULL;
+    comments = NULL;
+
+    char line_buf[MAX_LINE_LEN];
+    while (fgets(line_buf, sizeof(line_buf), fp)) {
+        char *line = strtok(line_buf, "\n");
+        if (!line) continue;
+
+        if (strcmp(line, "[keywords]") == 0) {
+            int count = 0;
+            keywords = (char**)malloc(sizeof(char*));
+            keywords[0] = NULL;
+            while (fgets(line_buf, sizeof(line_buf), fp) && strncmp(line_buf, "[", 1) != 0) {
+                line = strtok(line_buf, "\n");
+                if (line) {
+                    keywords = (char**)realloc(keywords, (count + 2) * sizeof(char*));
+                    keywords[count] = strdup(line);
+                    keywords[count + 1] = NULL;
+                    count++;
+                }
+            }
+        } else if (strcmp(line, "[comments]") == 0) {
+            int count = 0;
+            comments = (char**)malloc(sizeof(char*));
+            comments[0] = NULL;
+            while (fgets(line_buf, sizeof(line_buf), fp) && strncmp(line_buf, "[", 1) != 0) {
+                line = strtok(line_buf, "\n");
+                if (line) {
+                    comments = (char**)realloc(comments, (count + 2) * sizeof(char*));
+                    comments[count] = strdup(line);
+                    comments[count + 1] = NULL;
+                    count++;
+                }
+            }
+        }
+    }
+
+    fclose(fp);
+    snprintf(status_msg, MAX_LINE_LEN, "Config file '%s' loaded successfully.", path);
+    status_msg_timer = 50;
+    enable_syntax_highlighting = 1;
+}
+
+void save_config() {
+    if (!config_file) return;
+
+    FILE *fp = fopen(config_file, "w");
+    if (fp == NULL) {
+        return;
+    }
+
+    if (keywords) {
+        fprintf(fp, "[keywords]\n");
+        for (int i = 0; keywords[i] != NULL; i++) {
+            fprintf(fp, "%s\n", keywords[i]);
+        }
+    }
+
+    if (comments) {
+        fprintf(fp, "[comments]\n");
+        for (int i = 0; comments[i] != NULL; i++) {
+            fprintf(fp, "%s\n", comments[i]);
+        }
+    }
+
+    fclose(fp);
+}
+
+int is_keyword(const char *word) {
+    if (!keywords || !word || !isalpha(word[0])) return 0;
+    for (int i = 0; keywords[i] != NULL; i++) {
+        if (strcmp(word, keywords[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int is_comment_start(const char *word) {
+    if (!comments || !word) return 0;
+    for (int i = 0; comments[i] != NULL; i++) {
+        if (strncmp(word, comments[i], strlen(comments[i])) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void highlight_syntax(const char *line, int max_x, int y_pos) {
+    if (!enable_syntax_highlighting) {
+        mvprintw(y_pos, 0, "%.*s", max_x, line);
+        return;
+    }
+
+    int i = 0;
+    int start = 0;
+    int len = strlen(line);
+
+    while (i < len) {
+        if (is_comment_start(&line[i])) {
+            attron(COLOR_PAIR(C_COMMENT));
+            mvprintw(y_pos, i, "%.*s", max_x - i, &line[i]);
+            attroff(COLOR_PAIR(C_COMMENT));
+            i = len;
+            continue;
+        }
+
+        if (line[i] == '"') {
+            attron(COLOR_PAIR(C_STRING));
+            start = i;
+            i++;
+            while (i < len && line[i] != '"') i++;
+            if (i < len && line[i] == '"') i++;
+            mvprintw(y_pos, start, "%.*s", i - start, &line[start]);
+            start = i;
+            continue;
+        }
+
+        if (isdigit(line[i])) {
+            attron(COLOR_PAIR(C_NUMBER));
+            start = i;
+            while (i < len && isdigit(line[i])) i++;
+            mvprintw(y_pos, start, "%.*s", i - start, &line[start]);
+            start = i;
+            continue;
+        }
+
+        if (isalpha(line[i])) {
+            start = i;
+            while (i < len && isalnum(line[i])) i++;
+            char word[256];
+            strncpy(word, &line[start], i - start);
+            word[i - start] = '\0';
+            if (is_keyword(word)) {
+                attron(COLOR_PAIR(C_KEYWORD));
+            } else {
+                attron(COLOR_PAIR(C_NORMAL));
+            }
+            mvprintw(y_pos, start, "%s", word);
+            start = i;
+            continue;
+        }
+
+        attron(COLOR_PAIR(C_NORMAL));
+        mvaddch(y_pos, i, line[i]);
+        i++;
+    }
+    attroff(COLOR_PAIR(C_NORMAL));
+}
 
 void free_buffer() {
     Line *line = head;
@@ -201,7 +381,9 @@ void draw_screen() {
     }
 
     for (; line != NULL && y < max_y - 1; y++, line = line->next) {
-        mvprintw(y, 0, "%.*s", max_x, line->text);
+        move(y, 0);
+        highlight_syntax(line->text, max_x, y);
+        clrtoeol();
     }
 
     draw_statusbar(max_y, max_x);
@@ -256,7 +438,11 @@ void init_editor() {
     curs_set(1);
     if (has_colors()) {
         start_color();
-        init_pair(1, COLOR_WHITE, COLOR_BLUE);
+        init_pair(C_NORMAL, COLOR_WHITE, COLOR_BLACK);
+        init_pair(C_KEYWORD, COLOR_CYAN, COLOR_BLACK);
+        init_pair(C_STRING, COLOR_GREEN, COLOR_BLACK);
+        init_pair(C_NUMBER, COLOR_MAGENTA, COLOR_BLACK);
+        init_pair(C_COMMENT, COLOR_YELLOW, COLOR_BLACK);
     }
 }
 
@@ -310,15 +496,22 @@ void editor_loop() {
 }
 
 void cleanup() {
+    save_config();
     free_buffer();
     if (filename) free(filename);
+    free_string_array(keywords);
+    free_string_array(comments);
     endwin();
 }
 
 int main(int argc, char *argv[]) {
     init_editor();
 
-    if (argc > 1) {
+    if (argc > 3 && strcmp(argv[1], "-sy") == 0) {
+        config_file = strdup(argv[2]);
+        load_config(config_file);
+        open_file(argv[3]);
+    } else if (argc > 1) {
         open_file(argv[1]);
     } else {
         append_line(NULL);
