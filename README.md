@@ -11,3 +11,5 @@ it can save files and quit
 bindings:
 ctl + s:save
 ctl + q:quit
+photoage:
+![using termux](Screenshot_٢٠٢٥٠٨١١_١٥٢٤٥٩_com_termux_TermuxActivity_edit_672775007958353)
